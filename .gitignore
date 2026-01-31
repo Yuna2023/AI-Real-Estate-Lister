@@ -1,0 +1,17 @@
+# 環境變數檔案 (包含敏感金鑰)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# 相依套件
+node_modules/
+
+# 建置輸出
+dist/
+build/
+
+# 系統檔案
+.DS_Store
+Thumbs.db

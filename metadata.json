@@ -1,0 +1,7 @@
+{
+  "name": "AI Real Estate Lister",
+  "description": "A sophisticated tool that extracts and organizes real estate listing data from URLs using AI, featuring detailed property cards and smart image management.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
