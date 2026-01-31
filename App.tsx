@@ -12,6 +12,7 @@ const App: React.FC = () => {
   const [listings, setListings] = useState<PropertyListing[]>([]);
   const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
   const [error, setError] = useState<string | null>(null);
+  const [processedCount, setProcessedCount] = useState(0);
 
   // 6. 預覽房源資料
   const previewListing: PropertyListing = {
@@ -55,10 +56,24 @@ const App: React.FC = () => {
 
     setStatus(AppStatus.LOADING);
     setError(null);
+    setProcessedCount(0);
 
     try {
-      // 併發執行所有 URL 的擷取 (大幅提升多網址處理速度)
-      await Promise.all(validUrls.map(url => scrapeProperty(url)));
+      // 兼顧速度與進度的做法：併發執行，但每完成一個就更新計數器
+      const total = validUrls.length;
+      let completed = 0;
+
+      await Promise.all(
+        validUrls.map(async (url) => {
+          try {
+            await scrapeProperty(url);
+          } finally {
+            completed++;
+            // 由於併發，我們確保進度文字顯示目前完成到第幾個
+            setProcessedCount(completed);
+          }
+        })
+      );
 
       setUrlInputs(['']); // 恢復預設單一欄位
       setStatus(AppStatus.SUCCESS);
@@ -155,7 +170,9 @@ const App: React.FC = () => {
               disabled={status === AppStatus.LOADING || urlInputs.every(u => !u.trim())}
               className="w-full mt-6 py-4 bg-indigo-600 text-white rounded-lg text-sm font-bold disabled:bg-slate-300 transition-all flex items-center justify-center gap-2 border-none"
             >
-              {status === AppStatus.LOADING ? '正在處理數據...' : '取得房源資料'}
+              {status === AppStatus.LOADING
+                ? `正在抓取第 ${processedCount + 1} 筆房源資料...`
+                : '取得房源資料'}
             </button>
           </div>
 
