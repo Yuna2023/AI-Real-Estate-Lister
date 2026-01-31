@@ -55,11 +55,11 @@ const App: React.FC = () => {
 
     setStatus(AppStatus.LOADING);
     setError(null);
-    
+
     try {
-      for (const url of validUrls) {
-        await scrapeProperty(url);
-      }
+      // 併發執行所有 URL 的擷取 (大幅提升多網址處理速度)
+      await Promise.all(validUrls.map(url => scrapeProperty(url)));
+
       setUrlInputs(['']); // 恢復預設單一欄位
       setStatus(AppStatus.SUCCESS);
       setTimeout(() => setStatus(AppStatus.IDLE), 3000);
@@ -115,7 +115,7 @@ const App: React.FC = () => {
               <p className="text-sm text-slate-400">貼上網址，系統將透過 Firecrawl 自動完成資訊分析</p>
             </div>
             {/* 2. 新增欄位按鈕：白底藍紫色外框 */}
-            <button 
+            <button
               onClick={addInputField}
               className="px-4 py-2 border border-indigo-600 text-indigo-600 bg-white rounded-lg text-sm font-bold hover:bg-indigo-50 transition-colors"
             >
@@ -126,18 +126,18 @@ const App: React.FC = () => {
           <div className="space-y-4">
             {urlInputs.map((url, i) => (
               <div key={i} className="flex items-center gap-3">
-                <input 
-                  value={url} 
+                <input
+                  value={url}
                   onChange={(e) => {
                     const next = [...urlInputs];
                     next[i] = e.target.value;
                     setUrlInputs(next);
-                  }} 
-                  placeholder="請貼上房源網址 (例如 Zillow, Redfin...)" 
-                  className="flex-1 px-4 py-3 bg-[#FCFCFC] border border-slate-100 rounded-lg text-sm focus:border-indigo-500 focus:bg-white transition-all outline-none" 
+                  }}
+                  placeholder="請貼上房源網址 (例如 Zillow, Redfin...)"
+                  className="flex-1 px-4 py-3 bg-[#FCFCFC] border border-slate-100 rounded-lg text-sm focus:border-indigo-500 focus:bg-white transition-all outline-none"
                 />
                 {/* 4. 垃圾桶 icon */}
-                <button 
+                <button
                   onClick={() => removeInputField(i)}
                   className="p-3 text-slate-400 hover:text-red-500 transition-colors"
                   title="移除欄位"
@@ -148,11 +148,11 @@ const App: React.FC = () => {
                 </button>
               </div>
             ))}
-            
+
             {/* 3. 取得房源資料按鈕：藍紫色底無外框 */}
-            <button 
-              onClick={handleScrape} 
-              disabled={status === AppStatus.LOADING || urlInputs.every(u => !u.trim())} 
+            <button
+              onClick={handleScrape}
+              disabled={status === AppStatus.LOADING || urlInputs.every(u => !u.trim())}
               className="w-full mt-6 py-4 bg-indigo-600 text-white rounded-lg text-sm font-bold disabled:bg-slate-300 transition-all flex items-center justify-center gap-2 border-none"
             >
               {status === AppStatus.LOADING ? '正在處理數據...' : '取得房源資料'}
@@ -170,22 +170,22 @@ const App: React.FC = () => {
           {/* 6. 房源卡片預覽區 */}
           <div className="relative">
             <div className="absolute -top-3 left-4 z-10 bg-indigo-600 text-white text-[10px] font-bold px-2 py-1 rounded">PREVIEW 預覽</div>
-            <PropertyCard 
-              listing={previewListing} 
-              onDelete={() => {}} 
-              onUpdate={() => {}} 
+            <PropertyCard
+              listing={previewListing}
+              onDelete={() => { }}
+              onUpdate={() => { }}
             />
           </div>
 
           {listings.map(listing => (
-            <PropertyCard 
-              key={listing.id} 
-              listing={listing} 
-              onDelete={handleDelete} 
-              onUpdate={handleUpdate} 
+            <PropertyCard
+              key={listing.id}
+              listing={listing}
+              onDelete={handleDelete}
+              onUpdate={handleUpdate}
             />
           ))}
-          
+
           {listings.length === 0 && status !== AppStatus.LOADING && (
             <div className="hidden md:flex flex-col items-center justify-center py-24 text-center border border-dashed border-slate-200 rounded-2xl bg-slate-50/50">
               <div className="text-3xl mb-4 grayscale opacity-30">🏠</div>

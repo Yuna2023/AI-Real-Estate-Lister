@@ -44,8 +44,12 @@ const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const extractPropertyDataWithGemini = async (markdown, geminiApiKey) => {
   const genAI = new GoogleGenerativeAI(geminiApiKey);
 
-  // 使用 Gemini 2.5 Flash - 最新、最划算且支援度最廣的模型
-  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+  // 使用 Gemini 2.5 Flash
+  const model = genAI.getGenerativeModel({
+    model: "gemini-2.5-flash",
+    // 啟用結構化輸出模式 (JSON Mode)
+    generationConfig: { responseMimeType: "application/json" }
+  });
 
   const prompt = `You are a real estate data extraction assistant. Extract property information from the following markdown content of a real estate listing page.
 
@@ -71,18 +75,7 @@ ${markdown}`;
 
   try {
     const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const text = response.text();
-
-    // 清理可能的 markdown 格式
-    let cleanedText = text.trim();
-    if (cleanedText.startsWith('```json')) {
-      cleanedText = cleanedText.replace(/^```json\s*/, '').replace(/\s*```$/, '');
-    } else if (cleanedText.startsWith('```')) {
-      cleanedText = cleanedText.replace(/^```\s*/, '').replace(/\s*```$/, '');
-    }
-
-    const parsed = JSON.parse(cleanedText);
+    const parsed = JSON.parse(result.response.text());
     console.log("Gemini extracted data:", JSON.stringify(parsed));
     return parsed;
   } catch (error) {
@@ -122,7 +115,7 @@ exports.apiScrapeProperty = onCall({
         url: url,
         formats: ["markdown"],
         onlyMainContent: true,
-        timeout: 30000
+        timeout: 15000 // 縮短至 15 秒
       })
     });
 
