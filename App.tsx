@@ -103,6 +103,11 @@ const App: React.FC = () => {
 
   // 5. 移除 input 欄位邏輯
   const removeInputField = (index: number) => {
+    if (urlInputs.length <= 1) {
+      // 永遠保持最少一個輸入欄位
+      setUrlInputs(['']);
+      return;
+    }
     const next = [...urlInputs];
     next.splice(index, 1);
     setUrlInputs(next);
@@ -139,30 +144,40 @@ const App: React.FC = () => {
           </div>
 
           <div className="space-y-4">
-            {urlInputs.map((url, i) => (
-              <div key={i} className="flex items-center gap-3">
-                <input
-                  value={url}
-                  onChange={(e) => {
-                    const next = [...urlInputs];
-                    next[i] = e.target.value;
-                    setUrlInputs(next);
-                  }}
-                  placeholder="請貼上房源網址 (例如 Zillow, Redfin...)"
-                  className="flex-1 px-4 py-3 bg-[#FCFCFC] border border-slate-100 rounded-lg text-sm focus:border-indigo-500 focus:bg-white transition-all outline-none"
-                />
-                {/* 4. 垃圾桶 icon */}
-                <button
-                  onClick={() => removeInputField(i)}
-                  className="p-3 text-slate-400 hover:text-red-500 transition-colors"
-                  title="移除欄位"
-                >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                  </svg>
-                </button>
-              </div>
-            ))}
+            {urlInputs.map((url, i) => {
+              const isDuplicate = url.trim() !== '' && listings.some(l => l.url === url.trim());
+              return (
+                <div key={i} className="space-y-1">
+                  <div className="flex items-center gap-3">
+                    <input
+                      value={url}
+                      onChange={(e) => {
+                        const next = [...urlInputs];
+                        next[i] = e.target.value;
+                        setUrlInputs(next);
+                      }}
+                      placeholder="請貼上房源網址 (例如 Zillow, Redfin...)"
+                      className={`flex-1 px-4 py-3 bg-[#FCFCFC] border ${isDuplicate ? 'border-red-200 focus:border-red-400' : 'border-slate-100 focus:border-indigo-500'} rounded-lg text-sm focus:bg-white transition-all outline-none`}
+                    />
+                    {/* 4. 垃圾桶 icon */}
+                    <button
+                      onClick={() => removeInputField(i)}
+                      className="p-3 text-slate-400 hover:text-red-500 transition-colors"
+                      title="移除欄位"
+                    >
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                      </svg>
+                    </button>
+                  </div>
+                  {isDuplicate && (
+                    <p className="text-[11px] text-red-500 font-bold ml-1 animate-pulse">
+                      ⚠️ 這筆房源網址已經存在，是否確定要抓取資料？
+                    </p>
+                  )}
+                </div>
+              );
+            })}
 
             {/* 3. 取得房源資料按鈕：藍紫色底無外框 */}
             <button
