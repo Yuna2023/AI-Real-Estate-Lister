@@ -15,6 +15,9 @@ export interface PropertyListing {
   armls: string | null;
   description: string | null;
   images: string[];
+  region: string | null;      // 地區 (Peoria, Glendale, Phoenix 等)
+  priceStatus: string | null;  // 降價狀態 (手動)
+  listingStatus: string | null; // 上市狀態 (手動)
   lastUpdated: number;
 }
 

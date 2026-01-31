@@ -57,6 +57,7 @@ Return ONLY a valid JSON object with these fields (use null if not found):
 {
   "price": "string - the listing price (e.g., '$850,000')",
   "address": "string - full property address",
+  "region": "string - the city or region (e.g., 'Peoria', 'Glendale', 'Phoenix')",
   "beds": "string - number of bedrooms",
   "baths": "string - number of bathrooms", 
   "sqft": "string - interior square footage",
@@ -102,8 +103,12 @@ exports.apiScrapeProperty = onCall({
   }
 
   try {
-    // Step 1: 使用 Firecrawl /scrape API 取得 Markdown (消耗 1 credit)
-    console.log(`Scraping URL with Firecrawl: ${url}`);
+    console.log(`Scraping URL: ${url}`);
+
+    // 正規化網址以利精準比對
+    const normalizedUrl = url.trim().replace(/\/$/, "").toLowerCase();
+
+    // Step 1: Firecrawl 爬取 (優化參數以提升速度);
 
     const scrapeResponse = await fetch('https://api.firecrawl.dev/v1/scrape', {
       method: 'POST',
@@ -115,7 +120,7 @@ exports.apiScrapeProperty = onCall({
         url: url,
         formats: ["markdown"],
         onlyMainContent: true,
-        timeout: 15000 // 縮短至 15 秒
+        timeout: 30000 // 恢復為 30 秒以確保抓取穩定性
       })
     });
 
@@ -143,11 +148,14 @@ exports.apiScrapeProperty = onCall({
     const formattedDate = today.toISOString().split('T')[0];
 
     const propertyData = {
-      url,
-      displayId: generateDisplayId(),
+      url: normalizedUrl,
+      displayId: `REF-${Math.random().toString(36).substring(2, 7).toUpperCase()}`,
       createdAt: formattedDate,
       price: extracted.price || null,
       address: extracted.address || null,
+      region: extracted.region || null,
+      priceStatus: null,
+      listingStatus: null,
       beds: extracted.beds || null,
       baths: extracted.baths || null,
       sqft: extracted.sqft || null,

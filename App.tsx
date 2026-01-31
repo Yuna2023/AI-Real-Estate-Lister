@@ -13,6 +13,7 @@ const App: React.FC = () => {
   const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
   const [error, setError] = useState<string | null>(null);
   const [processedCount, setProcessedCount] = useState(0);
+  const [fieldErrors, setFieldErrors] = useState<Record<number, string>>({});
 
   // 6. 預覽房源資料
   const previewListing: PropertyListing = {
@@ -35,6 +36,9 @@ const App: React.FC = () => {
       'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&q=80&w=800',
       'https://images.unsplash.com/photo-1600607687940-4e524cb35a3a?auto=format&fit=crop&q=80&w=800'
     ],
+    region: 'Phoenix',
+    priceStatus: '降價中',
+    listingStatus: '上市中',
     lastUpdated: Date.now()
   };
 
@@ -57,26 +61,35 @@ const App: React.FC = () => {
     setStatus(AppStatus.LOADING);
     setError(null);
     setProcessedCount(0);
+    setFieldErrors({});
 
     try {
-      // 兼顧速度與進度的做法：併發執行，但每完成一個就更新計數器
       const total = validUrls.length;
       let completed = 0;
 
       await Promise.all(
-        validUrls.map(async (url) => {
+        urlInputs.map(async (url, index) => {
+          if (!url.trim()) return;
           try {
             await scrapeProperty(url);
+          } catch (err: any) {
+            setFieldErrors(prev => ({ ...prev, [index]: err.message || "抓取失敗" }));
           } finally {
             completed++;
-            // 由於併發，我們確保進度文字顯示目前完成到第幾個
             setProcessedCount(completed);
           }
         })
       );
 
-      setUrlInputs(['']); // 恢復預設單一欄位
-      setStatus(AppStatus.SUCCESS);
+      // 如果有任何欄位失敗，不自動清空欄位，讓使用者可以看到錯誤
+      const hasErrors = Object.keys(fieldErrors).length > 0;
+      if (!hasErrors) {
+        setUrlInputs(['']);
+        setStatus(AppStatus.SUCCESS);
+      } else {
+        setStatus(AppStatus.ERROR);
+      }
+
       setTimeout(() => setStatus(AppStatus.IDLE), 3000);
     } catch (err: any) {
       setError(err.message || "處理過程中發生錯誤");
@@ -135,17 +148,26 @@ const App: React.FC = () => {
               <p className="text-sm text-slate-400">貼上網址，系統將透過 Firecrawl 自動完成資訊分析</p>
             </div>
             {/* 2. 新增欄位按鈕：白底藍紫色外框 */}
+            {/* 2. 新增欄位按鈕：達到 4 筆時變灰 */}
             <button
               onClick={addInputField}
-              className="px-4 py-2 border border-indigo-600 text-indigo-600 bg-white rounded-lg text-sm font-bold hover:bg-indigo-50 transition-colors"
+              disabled={urlInputs.length >= 4}
+              className={`px-4 py-2 border rounded-lg text-sm font-bold transition-colors ${urlInputs.length >= 4
+                  ? 'border-slate-200 text-slate-300 bg-slate-50 cursor-not-allowed'
+                  : 'border-indigo-600 text-indigo-600 bg-white hover:bg-indigo-50'
+                }`}
             >
-              + 新增欄位
+              {urlInputs.length >= 4 ? '已達上限' : '+ 新增欄位'}
             </button>
           </div>
 
           <div className="space-y-4">
             {urlInputs.map((url, i) => {
-              const isDuplicate = url.trim() !== '' && listings.some(l => l.url === url.trim());
+              // 正規化比較網址 (去斜槓 + 小寫)
+              const normalizedUrl = url.trim().replace(/\/$/, "").toLowerCase();
+              const isDuplicate = url.trim() !== '' &&
+                status !== AppStatus.LOADING && // 正在抓取時不顯示警示，避免新存入的資料誤報
+                listings.some(l => l.url === normalizedUrl);
               return (
                 <div key={i} className="space-y-1">
                   <div className="flex items-center gap-3">
@@ -170,8 +192,12 @@ const App: React.FC = () => {
                       </svg>
                     </button>
                   </div>
-                  {isDuplicate && (
-                    <p className="text-[11px] text-red-500 font-bold ml-1 animate-pulse">
+                  {fieldErrors[i] ? (
+                    <p className="text-[11px] text-red-500 font-medium ml-1">
+                      ❌ {fieldErrors[i]}
+                    </p>
+                  ) : isDuplicate && (
+                    <p className="text-[11px] text-amber-600 font-bold ml-1 animate-pulse">
                       ⚠️ 這筆房源網址已經存在，是否確定要抓取資料？
                     </p>
                   )}
