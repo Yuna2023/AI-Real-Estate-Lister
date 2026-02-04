@@ -25,12 +25,12 @@ const processImages = (images) => {
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 
 // ========================================
-// Markdown 預處理
+// Markdown 預處理 (含 cchanghomes.com 專屬規則)
 // ========================================
 const preprocessMarkdown = (markdown) => {
   let cleaned = markdown;
 
-  // 1. 移除所有 <img> 標籤（圖片對解析無用，且佔用大量 tokens）
+  // 1. 移除所有 <img> 標籤
   cleaned = cleaned.replace(/<img[^>]*>/gi, '');
 
   // 2. 移除 <a> 標籤的 href，只保留文字內容
@@ -57,6 +57,13 @@ const preprocessMarkdown = (markdown) => {
     /<footer>[\s\S]*?<\/footer>/gi,
     /<nav>[\s\S]*?<\/nav>/gi,
     /<header>[\s\S]*?<\/header>/gi,
+    // cchanghomes.com 專屬規則
+    /Schedule a Showing[\s\S]*?(?=##|$)/gi,
+    /Request More Info[\s\S]*?(?=##|$)/gi,
+    /Contact Agent[\s\S]*?(?=##|$)/gi,
+    /Save Property[\s\S]*?(?=##|$)/gi,
+    /Share Listing[\s\S]*?(?=##|$)/gi,
+    /Featured Listings[\s\S]*?(?=##|$)/gi,
   ];
   removePatterns.forEach(pattern => { cleaned = cleaned.replace(pattern, ''); });
 
@@ -64,11 +71,126 @@ const preprocessMarkdown = (markdown) => {
   cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
   cleaned = cleaned.replace(/\s{2,}/g, ' ');
 
-  return cleaned.slice(0, 3500); // 保留 3500 字元以確保包含足夠資訊
+  return cleaned.slice(0, 7000); // 提高至 7000 字元以支援豪宅頁面
 };
 
 // ========================================
-// 單一階段完整解析 (含自動降級 + 增強重試)
+// Fallback 正則解析 (當 Gemini 失敗時使用)
+// ========================================
+const extractWithRegex = (markdown) => {
+  console.log('[Regex Fallback] Attempting regex extraction...');
+
+  const result = {
+    price: null,
+    address: null,
+    region: null,
+    beds: null,
+    baths: null,
+    sqft: null,
+    yearBuilt: null,
+    lotSizeSqft: null,
+    lotSizeAcres: null,
+    daysOnMarket: null,
+    armls: null,
+    description: null,
+    images: [],
+    priceStatus: 'normal',
+    priceDropAmount: null,
+    originalPrice: null
+  };
+
+  // 價格提取
+  const pricePatterns = [
+    /\$\s*([\d,]+(?:\.\d{2})?)/,
+    /Price[:\s]*\$?([\d,]+)/i,
+    /List Price[:\s]*\$?([\d,]+)/i
+  ];
+  for (const pattern of pricePatterns) {
+    const match = markdown.match(pattern);
+    if (match) {
+      result.price = '$' + match[1].replace(/,/g, '').replace(/(\d)(?=(\d{3})+$)/g, '$1,');
+      break;
+    }
+  }
+
+  // 地址提取 (Arizona 格式)
+  const addressPatterns = [
+    /(\d+\s+[\w\s]+(?:St|Street|Ave|Avenue|Blvd|Boulevard|Dr|Drive|Rd|Road|Ln|Lane|Way|Ct|Court|Cir|Circle)[,\s]+[\w\s]+,\s*AZ\s*\d{5})/i,
+    /(\d+\s+[\w\s]+,\s*[\w\s]+,\s*AZ\s*\d{5})/i
+  ];
+  for (const pattern of addressPatterns) {
+    const match = markdown.match(pattern);
+    if (match) {
+      result.address = match[1].trim();
+      const cityMatch = result.address.match(/,\s*([\w\s]+),\s*AZ/i);
+      if (cityMatch) result.region = cityMatch[1].trim();
+      break;
+    }
+  }
+
+  // 房型提取
+  const bedsMatch = markdown.match(/(\d+)\s*(?:beds?|bedrooms?|bd)/i);
+  if (bedsMatch) result.beds = bedsMatch[1];
+
+  const bathsMatch = markdown.match(/(\d+(?:\.\d+)?)\s*(?:baths?|bathrooms?|ba)/i);
+  if (bathsMatch) result.baths = bathsMatch[1];
+
+  // 面積提取
+  const sqftMatch = markdown.match(/([\d,]+)\s*(?:sq\.?\s*ft|sqft|square feet)/i);
+  if (sqftMatch) result.sqft = sqftMatch[1].replace(/,/g, '');
+
+  // 建年
+  const yearMatch = markdown.match(/(?:built|year built|constructed)[:\s]*(\d{4})/i);
+  if (yearMatch) result.yearBuilt = yearMatch[1];
+
+  // 建地 (多種格式 + Acres 自動換算)
+  const lotPatterns = [
+    /Lot\s*Siz[e]?[:\s]*([\d.]+)\s*acres?/i,
+    /Lot\s*Size[:\s]*([\d.]+)\s*acres?/i,
+    /([\d.]+)\s*acres?\s*lot/i,
+    /([\d.]+)\s*acres?/i
+  ];
+  for (const pattern of lotPatterns) {
+    const match = markdown.match(pattern);
+    if (match) {
+      result.lotSizeAcres = match[1];
+      result.lotSizeSqft = Math.round(parseFloat(match[1]) * 43560).toString();
+      break;
+    }
+  }
+  // 如果直接有 sqft 格式
+  if (!result.lotSizeSqft) {
+    const lotSqftMatch = markdown.match(/lot[:\s]*([\d,]+)\s*(?:sq\.?\s*ft|sqft)/i);
+    if (lotSqftMatch) result.lotSizeSqft = lotSqftMatch[1].replace(/,/g, '');
+  }
+
+  // MLS/ARMLS (多種格式，含 MLS® ID)
+  const armlsPatterns = [
+    /MLS[\u00ae®]?\s*ID[:\s]*(\d+)/i,
+    /MLS[\u00ae®]?[#:\s]*(\d+)/i,
+    /ARMLS[#:\s]*(\d+)/i,
+    /Listing\s*ID[:\s]*(\d+)/i,
+    /Property\s*ID[:\s]*(\d+)/i,
+    /#(\d{7,})/
+  ];
+  for (const pattern of armlsPatterns) {
+    const match = markdown.match(pattern);
+    if (match) {
+      result.armls = match[1];
+      break;
+    }
+  }
+
+  // 圖片 URL
+  const imgMatches = markdown.match(/https?:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|webp)/gi);
+  if (imgMatches) result.images = [...new Set(imgMatches)].slice(0, 5);
+
+  console.log('[Regex Fallback] Extracted:', JSON.stringify(result));
+  return result;
+};
+
+// ========================================
+// 單一階段完整解析 (含模型 Fallback + 正則 Fallback)
 // ========================================
 const extractPropertyData = async (markdown, geminiApiKey, onStatus = null) => {
   const processedMarkdown = preprocessMarkdown(markdown);
@@ -76,120 +198,127 @@ const extractPropertyData = async (markdown, geminiApiKey, onStatus = null) => {
 
   const genAI = new GoogleGenerativeAI(geminiApiKey);
 
-  // 使用環境變數或預設別名
-  const modelName = process.env.GEMINI_MODEL || "gemini-flash-latest";
-  console.log(`[Gemini] Using model: ${modelName}`);
+  // 模型 Fallback 順序：gemini-2.5-flash → gemini-flash (動態別名)
+  const modelCandidates = [
+    process.env.GEMINI_MODEL || "gemini-2.5-flash",
+    "gemini-flash"
+  ];
 
-  // 定義完整 Response Schema
+  // 定義 Response Schema (移除 required 限制，強化描述)
   const propertySchema = {
     type: "object",
     properties: {
-      price: { type: "string", description: "Price with currency symbol" },
-      address: { type: "string", description: "Full street address" },
-      region: { type: "string", description: "City name" },
-      beds: { type: "string", description: "Number of bedrooms" },
-      baths: { type: "string", description: "Number of bathrooms" },
-      sqft: { type: "string", description: "Interior sqft" },
-      yearBuilt: { type: "string", nullable: true, description: "Year built" },
-      lotSizeSqft: { type: "string", nullable: true, description: "Lot size in sqft" },
-      lotSizeAcres: { type: "string", nullable: true, description: "Lot size in acres" },
+      price: { type: "string", nullable: true, description: "Listing price with $ symbol (e.g., '$599,000')" },
+      address: { type: "string", nullable: true, description: "Full street address including city, state and zip" },
+      region: { type: "string", nullable: true, description: "City name only (e.g., 'Peoria', 'Phoenix', 'Glendale')" },
+      beds: { type: "string", nullable: true, description: "Number of bedrooms as a number" },
+      baths: { type: "string", nullable: true, description: "Number of bathrooms as a number" },
+      sqft: { type: "string", nullable: true, description: "Interior living area in square feet" },
+      yearBuilt: { type: "string", nullable: true, description: "Year the property was built (4 digits)" },
+      lotSizeSqft: { type: "string", nullable: true, description: "Lot size in sqft. Look in 'Exterior Features' for 'Lot Siz'. If in acres, convert: 1 acre = 43560 sqft" },
+      lotSizeAcres: { type: "string", nullable: true, description: "Lot size in acres if available" },
       daysOnMarket: { type: "string", nullable: true, description: "Days on market" },
-      armls: { type: "string", nullable: true, description: "MLS number" },
-      description: { type: "string", nullable: true, description: "Property summary" },
-      images: { type: "array", items: { type: "string" }, description: "Image URLs" },
-      priceStatus: { type: "string", enum: ["price_drop", "normal", "sold", "pending"] },
-      priceDropAmount: { type: "string", nullable: true, description: "Price drop amount" },
-      originalPrice: { type: "string", nullable: true, description: "Original price" }
-    },
-    required: ["price", "address", "region", "beds", "baths", "sqft", "images", "description"]
+      armls: { type: "string", nullable: true, description: "MLS/ARMLS listing number. May appear as 'ARMLS#', 'MLS#', 'Listing ID', or 'Property ID'" },
+      description: { type: "string", nullable: true, description: "Property description summary under 150 words" },
+      images: { type: "array", items: { type: "string" }, description: "Property photo URLs (first 5 only)" },
+      priceStatus: { type: "string", enum: ["price_drop", "normal", "sold", "pending"], nullable: true },
+      priceDropAmount: { type: "string", nullable: true, description: "Price reduction amount if applicable" },
+      originalPrice: { type: "string", nullable: true, description: "Original price before reduction" }
+    }
   };
 
-  // 模式設定：標準模式 vs 精簡模式
-  const modes = [
-    {
-      name: "standard",
-      tokens: 2000,
-      instruction: "Extract property details. Return valid JSON only. Description MUST be under 150 words. Images: return only the FIRST 3 image URLs found."
-    },
-    {
-      name: "compact",
-      tokens: 1500,
-      instruction: "COMPACT MODE: Return minimal JSON. Description MAX 80 words. Images: only FIRST 2 URLs. Keep all values SHORT."
-    }
-  ];
+  const prompt = `Extract property details from this real estate listing. Return all available fields as JSON. If a field is not found, return null for that field.
 
-  const prompt = `Extract property details from listing:\n\n${processedMarkdown}`;
-  const maxRetriesPerMode = 2; // 每個模式最多重試 2 次
+IMPORTANT FIELD LOCATIONS:
+- Lot Size: Look in "Exterior Features" section for "Lot Siz" or "Lot Size". Often in acres (convert: 1 acre = 43560 sqft)
+- ARMLS/MLS: Look for "ARMLS#", "MLS#", "Listing ID", or "Property ID"
+- Year Built: Usually in property details or overview section
+- Description: The main property description paragraph
 
-  // 嘗試標準模式，失敗則降級
-  for (const mode of modes) {
-    for (let attempt = 1; attempt <= maxRetriesPerMode; attempt++) {
-      const statusMsg = attempt === 1
-        ? `${mode.name} 模式解析中...`
-        : `${mode.name} 模式重試 (${attempt}/${maxRetriesPerMode})...`;
+${processedMarkdown}`;
 
-      if (onStatus) onStatus(statusMsg);
-      console.log(`[Gemini] ${statusMsg} (maxTokens: ${mode.tokens})`);
+  // 嘗試每個模型
+  for (const modelName of modelCandidates) {
+    console.log(`[Gemini] Trying model: ${modelName}`);
+    if (onStatus) onStatus(`使用 ${modelName} 解析中...`);
 
+    try {
       const model = genAI.getGenerativeModel({
         model: modelName,
         generationConfig: {
           responseMimeType: "application/json",
           responseSchema: propertySchema,
-          maxOutputTokens: mode.tokens
+          maxOutputTokens: 2000
         },
-        systemInstruction: mode.instruction
+        systemInstruction: "You are a real estate data extractor. Extract property information accurately. Return valid JSON only. Description should be under 150 words. Return only the first 5 image URLs found."
       });
 
-      try {
-        const result = await model.generateContent(prompt);
-        let rawText = result.response.text();
+      const result = await model.generateContent(prompt);
+      let rawText = result.response.text();
 
-        // 安全處理：移除可能的 Markdown code block
-        rawText = rawText.trim();
-        if (rawText.startsWith('```')) {
-          rawText = rawText.replace(/^```(?:json)?/, '').replace(/```$/, '');
-        }
+      rawText = rawText.trim();
+      if (rawText.startsWith('```')) {
+        rawText = rawText.replace(/^```(?:json)?/, '').replace(/```$/, '');
+      }
 
-        const parsed = JSON.parse(rawText);
-        console.log(`[Gemini] ${mode.name} mode succeeded!`);
-        if (onStatus) onStatus('解析完成');
-        return parsed;
+      const parsed = JSON.parse(rawText);
+      console.log(`[Gemini] ${modelName} succeeded!`);
 
-      } catch (error) {
-        console.error(`[Gemini] ${mode.name} mode attempt ${attempt} failed:`, error.message);
+      // Gemini 成功但關鍵欄位缺失時，用正則補抓
+      if (!parsed.lotSizeSqft || !parsed.armls || !parsed.price || !parsed.address) {
+        console.log('[Gemini] Some fields missing, merging with regex fallback...');
+        const regexData = extractWithRegex(markdown);
+        // 只補充 Gemini 沒抓到的欄位
+        if (!parsed.price && regexData.price) parsed.price = regexData.price;
+        if (!parsed.address && regexData.address) parsed.address = regexData.address;
+        if (!parsed.region && regexData.region) parsed.region = regexData.region;
+        if (!parsed.beds && regexData.beds) parsed.beds = regexData.beds;
+        if (!parsed.baths && regexData.baths) parsed.baths = regexData.baths;
+        if (!parsed.sqft && regexData.sqft) parsed.sqft = regexData.sqft;
+        if (!parsed.yearBuilt && regexData.yearBuilt) parsed.yearBuilt = regexData.yearBuilt;
+        if (!parsed.lotSizeSqft && regexData.lotSizeSqft) parsed.lotSizeSqft = regexData.lotSizeSqft;
+        if (!parsed.lotSizeAcres && regexData.lotSizeAcres) parsed.lotSizeAcres = regexData.lotSizeAcres;
+        if (!parsed.armls && regexData.armls) parsed.armls = regexData.armls;
+        if ((!parsed.images || parsed.images.length === 0) && regexData.images.length > 0) parsed.images = regexData.images;
+        console.log('[Gemini] Merged result:', JSON.stringify(parsed));
+      }
 
-        // 如果是 429/503 等伺服器錯誤，等待 5 秒後重試
-        if (error.message?.includes('429') || error.message?.includes('503')) {
-          if (onStatus) onStatus('伺服器忙碌，等待重試...');
-          console.log('[Gemini] Rate limit hit, waiting 5 seconds...');
-          await new Promise(r => setTimeout(r, 5000));
-          continue; // 繼續同一模式的下一次嘗試
-        }
+      if (onStatus) onStatus('解析完成');
+      return parsed;
 
-        // JSON 解析錯誤，不重試同一模式，直接跳到下一個模式
-        if (error.message?.includes('JSON') || error.message?.includes('Unterminated')) {
-          console.log('[Gemini] JSON parsing error, skipping to next mode...');
-          break; // 跳出內層迴圈，進入下一個模式
-        }
+    } catch (error) {
+      console.error(`[Gemini] ${modelName} failed:`, error.message);
 
-        // 其他錯誤，繼續重試
-        if (attempt < maxRetriesPerMode) {
-          if (onStatus) onStatus(`重試中 (${attempt + 1}/${maxRetriesPerMode})...`);
-          await new Promise(r => setTimeout(r, 2000));
-        }
+      // 模型不存在或已淘汰，嘗試下一個
+      if (error.message?.includes('not found') ||
+        error.message?.includes('deprecated') ||
+        error.message?.includes('404') ||
+        error.message?.includes('does not exist')) {
+        console.log(`[Gemini] Model ${modelName} unavailable, trying next...`);
+        if (onStatus) onStatus(`${modelName} 已淘汰，切換備用模型...`);
+        continue;
+      }
+
+      // 速率限制，等待後重試
+      if (error.message?.includes('429') || error.message?.includes('503')) {
+        console.log('[Gemini] Rate limit, waiting 5s...');
+        if (onStatus) onStatus('伺服器忙碌，等待重試...');
+        await new Promise(r => setTimeout(r, 5000));
       }
     }
-
-    // 如果已經是最後一個模式且失敗，拋出錯誤
-    if (mode.name === 'compact') {
-      throw new Error('Gemini 解析失敗 (已嘗試所有模式)');
-    }
-
-    // 否則降級到下一個模式
-    if (onStatus) onStatus('降級到精簡模式...');
-    console.log('[Gemini] Falling back to compact mode...');
   }
+
+  // 所有模型都失敗，使用正則 Fallback
+  console.log('[Gemini] All models failed, using regex fallback...');
+  if (onStatus) onStatus('AI 解析失敗，使用備用提取...');
+
+  const regexResult = extractWithRegex(markdown);
+
+  if (!regexResult.price && !regexResult.address) {
+    throw new Error('所有解析方式皆失敗。請確認網頁內容是否正確。若問題持續，請聯繫開發者更新模型設定。');
+  }
+
+  return regexResult;
 };
 
 // ========================================
@@ -240,9 +369,6 @@ const calculateDistancesInternal = async (origin, apiKey) => {
 // ========================================
 // API: 單一房源抓取
 // ========================================
-// ========================================
-// API: 單一房源抓取
-// ========================================
 exports.apiScrapeProperty = onCall({
   secrets: ["FIRECRAWL_API_KEY", "GEMINI_API_KEY", "GEMINI_MODEL"],
   timeoutSeconds: 60,
@@ -267,12 +393,14 @@ exports.apiScrapeProperty = onCall({
   const markdown = scrapeData.data?.markdown;
   if (!markdown || markdown.length < 100) throw new HttpsError('internal', 'Markdown 內容不足');
 
-  // 單一階段完整解析
   const data = await extractPropertyData(markdown, geminiApiKey);
 
-  // 數值處理
+  // 檢查是否為已售出/下架的房源
+  if (!data.price && !data.address) {
+    throw new HttpsError('failed-precondition', '此房源可能已售出或下架，無法抓取資料');
+  }
+
   const priceUsd = data.price ? parseFloat(data.price.replace(/[^0-9.]/g, '')) : 0;
-  const sqftToPin = (val) => val ? (parseFloat(val) / 35.58).toFixed(1) : null;
 
   const calculateLotSqft = (acres, sqft) => {
     if (sqft) return sqft.replace(/[^0-9.]/g, '');
@@ -286,7 +414,6 @@ exports.apiScrapeProperty = onCall({
     displayId: generateDisplayId(),
     createdAt: new Date().toISOString().split('T')[0],
 
-    // 核心資訊
     price: data.price || null,
     price_usd: priceUsd,
     address: data.address || null,
@@ -294,13 +421,16 @@ exports.apiScrapeProperty = onCall({
     beds: data.beds || null,
     baths: data.baths || null,
     sqft: data.sqft || null,
-    sqftPing: sqftToPin(data.sqft),
+    // sqftPing removed - frontend will calculate
 
-    // 詳細資訊 (直接填充)
     sqftLot: lotSqft,
-    sqftLotPing: sqftToPin(lotSqft),
-    description: data.description || null,
-    descriptionZh: null, // 按需翻譯
+    lotSizeAcres: data.lotSizeAcres || null,
+    // sqftLotPing removed - frontend will calculate
+    // 豪宅 ($2M+) 跳過描述拓取
+    description: priceUsd > 2000000
+      ? '房屋描述過長無法正常抓取，請手動補充'
+      : (data.description || null),
+    descriptionZh: null,
     yearBuilt: data.yearBuilt || null,
     daysOnMarket: data.daysOnMarket || null,
     armls: data.armls || null,
@@ -308,10 +438,8 @@ exports.apiScrapeProperty = onCall({
     priceDropAmount: data.priceDropAmount || null,
     originalPrice: data.originalPrice || null,
 
-    // 多圖處理
     images: processImages(data.images),
 
-    // 距離欄位 (需另行計算)
     tsmc_distance_miles: null,
     tsmc_duration_minutes: null,
     intel_distance_miles: null,
@@ -324,7 +452,7 @@ exports.apiScrapeProperty = onCall({
 
     lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
     listing_status: 'pre_listed',
-    edit_status: 'draft', // 一次完成，直接進入 draft
+    edit_status: 'draft',
     tags: data.region ? [data.region] : [],
     price_drop: data.priceStatus === 'price_drop',
     school_district: "一般",
@@ -338,7 +466,7 @@ exports.apiScrapeProperty = onCall({
 });
 
 // ========================================
-// API: 批次抓取 (並行獨立處理 + 即時狀態)
+// API: 批次抓取
 // ========================================
 exports.apiScrapeBatch = onCall({
   secrets: ["FIRECRAWL_API_KEY", "GEMINI_API_KEY", "GEMINI_MODEL"],
@@ -355,8 +483,6 @@ exports.apiScrapeBatch = onCall({
   }
 
   const totalCount = urls.length;
-
-  // 建立批次任務狀態文件
   const batchId = `batch_${Date.now()}`;
   const statusRef = db.collection('batch_status').doc(batchId);
 
@@ -374,9 +500,6 @@ exports.apiScrapeBatch = onCall({
     }))
   });
 
-  console.log(`[Batch] 開始處理 ${totalCount} 筆，狀態追蹤: ${batchId}`);
-
-  // 更新單一項目狀態的輔助函數
   const updateItemStatus = async (index, status, message) => {
     const doc = await statusRef.get();
     const items = doc.data().items;
@@ -393,12 +516,14 @@ exports.apiScrapeBatch = onCall({
     });
   };
 
-  // 並行處理流水線
-  const processingPromises = urls.map(async (url, index) => {
+  // 批次處理 (加入 500ms 間隔以避免速率限制)
+  const processWithDelay = async (url, index) => {
+    // 加入間隔避免 Gemini 速率限制
+    if (index > 0) {
+      await new Promise(r => setTimeout(r, 500));
+    }
     try {
-      // 1. Firecrawl 抓取
       await updateItemStatus(index, 'scraping', `正在抓取第 ${index + 1} 筆...`);
-      console.log(`[Batch] 抓取中 (${index + 1}/${totalCount}): ${url}`);
 
       const resp = await fetch('https://api.firecrawl.dev/v1/scrape', {
         method: 'POST',
@@ -411,16 +536,15 @@ exports.apiScrapeBatch = onCall({
       const markdown = data.data?.markdown;
       if (!markdown || markdown.length < 100) throw new Error("Markdown 內容不足");
 
-      // 2. Gemini 完整解析 (含狀態回調)
       await updateItemStatus(index, 'parsing', `正在解析第 ${index + 1} 筆...`);
 
-      const onGeminiStatus = async (msg) => {
-        await updateItemStatus(index, 'parsing', `第 ${index + 1} 筆: ${msg}`);
-      };
+      const extractData = await extractPropertyData(markdown, geminiApiKey);
 
-      const extractData = await extractPropertyData(markdown, geminiApiKey, onGeminiStatus);
+      // 檢查是否為已售出/下架的房源
+      if (!extractData.price && !extractData.address) {
+        throw new Error('此房源可能已售出或下架');
+      }
 
-      // 3. 資料處理與寫入
       await updateItemStatus(index, 'saving', `正在儲存第 ${index + 1} 筆...`);
 
       const priceUsd = extractData.price ? parseFloat(extractData.price.replace(/[^0-9.]/g, '')) : 0;
@@ -445,11 +569,15 @@ exports.apiScrapeBatch = onCall({
         beds: extractData.beds || null,
         baths: extractData.baths || null,
         sqft: extractData.sqft || null,
-        sqftPing: sqftToPin(extractData.sqft),
+        // sqftPing removed - frontend will calculate
 
         sqftLot: lotSqft,
-        sqftLotPing: sqftToPin(lotSqft),
-        description: extractData.description || null,
+        lotSizeAcres: extractData.lotSizeAcres || null,
+        // sqftLotPing removed - frontend will calculate
+        // 豪宅 ($2M+) 跳過描述拓取
+        description: priceUsd > 2000000
+          ? '房屋描述過長無法正常抓取，請手動補充'
+          : (extractData.description || null),
         descriptionZh: null,
         yearBuilt: extractData.yearBuilt || null,
         daysOnMarket: extractData.daysOnMarket || null,
@@ -482,21 +610,18 @@ exports.apiScrapeBatch = onCall({
 
       const docRef = await db.collection('listings').add(propertyData);
       await updateItemStatus(index, 'success', `✓ 完成`);
-      console.log(`[Batch] 完成寫入 (${index + 1}/${totalCount}): ${docRef.id}`);
 
       return { url, success: true, id: docRef.id };
 
     } catch (err) {
       await updateItemStatus(index, 'error', `✗ ${err.message}`);
-      console.error(`[Batch] 失敗 (${index + 1}/${totalCount}, ${url}):`, err.message);
       return { url, success: false, error: err.message };
     }
-  });
+  };
 
-  // 等待所有並行任務完成
+  const processingPromises = urls.map((url, index) => processWithDelay(url, index));
   const results = await Promise.all(processingPromises);
 
-  // 更新最終狀態
   await statusRef.update({
     finishedAt: admin.firestore.FieldValue.serverTimestamp(),
     currentStatus: '處理完成',
@@ -514,7 +639,7 @@ exports.apiScrapeBatch = onCall({
 });
 
 // ========================================
-// API: 計算距離（按需）
+// API: 計算距離
 // ========================================
 exports.apiCalculateDistances = onCall({
   secrets: ["GOOGLE_MAPS_API_KEY"],
@@ -549,7 +674,7 @@ exports.apiCalculateDistances = onCall({
 });
 
 // ========================================
-// API: 翻譯描述（按需）
+// API: 翻譯描述
 // ========================================
 exports.apiTranslateDescription = onCall({
   secrets: ["GEMINI_API_KEY"],
@@ -565,7 +690,7 @@ exports.apiTranslateDescription = onCall({
   }
 
   const genAI = new GoogleGenerativeAI(geminiApiKey);
-  const model = genAI.getGenerativeModel({ model: "gemini-3-flash-preview" });
+  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
   const prompt = `將以下英文房地產描述翻譯成繁體中文，保持專業語調：\n\n${text}\n\n只回傳翻譯結果。`;
 

@@ -18,25 +18,46 @@ const PropertyCard: React.FC<PropertyCardProps> = ({ listing, onDelete, onUpdate
   const [editData, setEditData] = useState<PropertyListing>({ ...listing });
   const [isCalculatingDistance, setIsCalculatingDistance] = useState(false);
   const [isTranslating, setIsTranslating] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   // Sync editData when listing updates (important for Phase 2 updates)
   useEffect(() => {
     setEditData({ ...listing });
   }, [listing]);
 
+  // 單位換算：sqft → 坪 (前端計算)
+  const sqftToPing = (sqft: string | number | null | undefined): string | null => {
+    if (!sqft) return null;
+    const num = parseFloat(sqft.toString().replace(/,/g, ''));
+    if (isNaN(num) || num <= 0) return null;
+    return (num / 35.58).toFixed(1);
+  };
+
+  // 距離計算函數 (必須在 useEffect 之前定義)
   const handleCalculateDistance = async () => {
-    if (!listing.address) return;
+    if (!listing.address || isCalculatingDistance) return;
     setIsCalculatingDistance(true);
     try {
       const apiCalculateDistances = httpsCallable(functions, 'apiCalculateDistances');
       await apiCalculateDistances({ listingId: listing.id, address: listing.address });
     } catch (err) {
       console.error('Distance calculation failed:', err);
-      alert('距離計算失敗，請稍後再試');
+      // 不顯示 alert，避免干擾使用者
     } finally {
       setIsCalculatingDistance(false);
     }
   };
+
+  // 自動計算距離 (卡片載入時)
+  useEffect(() => {
+    if (!listing.distanceCalculated && listing.address && !isCalculatingDistance) {
+      // 延遲後自動觸發，避免同時請求過多
+      const timer = setTimeout(() => {
+        handleCalculateDistance();
+      }, 1000 + Math.random() * 2000); // 隨機 1-3 秒
+      return () => clearTimeout(timer);
+    }
+  }, [listing.id, listing.distanceCalculated, listing.address]);
 
   const handleTranslate = async () => {
     if (!editData.description) return;
@@ -137,15 +158,39 @@ const PropertyCard: React.FC<PropertyCardProps> = ({ listing, onDelete, onUpdate
       );
     }
 
-    // Single button to calculate all distances
+    // 距離計算中 - 顯示 Loading 狀態
+    if (isCalculatingDistance) {
+      return (
+        <div className="grid grid-cols-2 gap-2 bg-gradient-to-br from-indigo-50 to-slate-50 p-2 rounded-lg border border-indigo-100 animate-pulse">
+          <div className="space-y-0.5">
+            <span className="text-[10px] text-indigo-500 font-bold block">🏭 TSMC</span>
+            <span className="text-sm font-bold text-slate-400">Loading...</span>
+          </div>
+          <div className="space-y-0.5">
+            <span className="text-[10px] text-indigo-500 font-bold block">🛒 Costco</span>
+            <span className="text-sm font-bold text-slate-400">Loading...</span>
+          </div>
+          <div className="space-y-0.5">
+            <span className="text-[10px] text-indigo-500 font-bold block">💻 Intel</span>
+            <span className="text-sm font-bold text-slate-400">Loading...</span>
+          </div>
+          <div className="space-y-0.5">
+            <span className="text-[10px] text-indigo-500 font-bold block">✈️ PHX機場</span>
+            <span className="text-sm font-bold text-slate-400">Loading...</span>
+          </div>
+        </div>
+      );
+    }
+
+    // 尚未計算 - 顯示手動按鈕
     return (
       <div className="bg-gradient-to-br from-indigo-50 to-slate-50 p-3 rounded-lg border border-indigo-100 text-center">
         <button
           onClick={handleCalculateDistance}
-          disabled={isCalculatingDistance || !listing.address}
+          disabled={!listing.address}
           className="px-4 py-2 bg-indigo-600 text-white rounded-lg font-bold hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm"
         >
-          {isCalculatingDistance ? '⏳ 計算中...' : '🗺️ 計算交通距離'}
+          🗺️ 計算交通距離
         </button>
         <p className="text-[10px] text-slate-400 mt-1">TSMC / Costco / Intel / PHX機場</p>
       </div>
@@ -306,12 +351,14 @@ const PropertyCard: React.FC<PropertyCardProps> = ({ listing, onDelete, onUpdate
 
         {/* Delete Button */}
         <button
-          onClick={(e) => { e.stopPropagation(); onDelete(listing.id); }}
+          onClick={(e) => { e.stopPropagation(); setShowDeleteConfirm(true); }}
           className="absolute top-2 right-2 p-1.5 bg-black/50 text-white rounded-full hover:bg-red-600 transition-colors z-10"
           title="刪除"
         >
           <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
         </button>
+
+
 
         {/* Thumbnail Scroll */}
         {listing.images && listing.images.length > 1 && (
@@ -379,14 +426,14 @@ const PropertyCard: React.FC<PropertyCardProps> = ({ listing, onDelete, onUpdate
             <span className="text-slate-400 block text-[10px]">室內</span>
             <span className="font-semibold">
               {listing.sqft || '-'} sqft
-              {listing.sqftPing && <span className="text-indigo-600 ml-1">({listing.sqftPing}坪)</span>}
+              {sqftToPing(listing.sqft) && <span className="text-indigo-600 ml-1">({sqftToPing(listing.sqft)}坪)</span>}
             </span>
           </div>
           <div>
             <span className="text-slate-400 block text-[10px]">建地</span>
             <span className="font-semibold">
               {isPendingDetail ? '...' : (listing.sqftLot || '-')} sqft
-              {listing.sqftLotPing && <span className="text-indigo-600 ml-1">({listing.sqftLotPing}坪)</span>}
+              {sqftToPing(listing.sqftLot) && <span className="text-indigo-600 ml-1">({sqftToPing(listing.sqftLot)}坪)</span>}
             </span>
           </div>
         </div>
@@ -436,6 +483,29 @@ const PropertyCard: React.FC<PropertyCardProps> = ({ listing, onDelete, onUpdate
           </div>
         </div>
       </div>
+
+      {/* Delete Confirmation Modal - Moved to root to cover entire card */}
+      {showDeleteConfirm && (
+        <div className="absolute inset-0 bg-black/60 flex items-center justify-center z-50 rounded-xl" onClick={(e) => e.stopPropagation()}>
+          <div className="bg-white p-4 rounded-lg shadow-xl text-center">
+            <p className="text-sm font-bold text-slate-800 mb-3">確定要刪除此房源嗎？</p>
+            <div className="flex gap-2 justify-center">
+              <button
+                onClick={() => { onDelete(listing.id); setShowDeleteConfirm(false); }}
+                className="px-3 py-1.5 bg-red-600 text-white rounded text-xs font-bold hover:bg-red-700"
+              >
+                確定刪除
+              </button>
+              <button
+                onClick={() => setShowDeleteConfirm(false)}
+                className="px-3 py-1.5 bg-slate-200 text-slate-700 rounded text-xs font-bold hover:bg-slate-300"
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {isPreviewingLine && (
         <LineCardPreview listing={listing} onClose={() => setIsPreviewingLine(false)} />

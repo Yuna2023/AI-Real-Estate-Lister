@@ -16,6 +16,11 @@ const App: React.FC = () => {
   const [fieldErrors, setFieldErrors] = useState<Record<number, string>>({});
   const [waitingMessage, setWaitingMessage] = useState<string>('');
 
+  // Duplicate Handling
+  const [showDuplicateConfirm, setShowDuplicateConfirm] = useState(false);
+  const [pendingScrapeUrls, setPendingScrapeUrls] = useState<string[]>([]);
+  const [duplicateWarnings, setDuplicateWarnings] = useState<{ url: string, id: string, displayId: string }[]>([]);
+
   // Search Filters State
   const [filters, setFilters] = useState({
     keyword: '',
@@ -42,15 +47,42 @@ const App: React.FC = () => {
     return () => unsubscribe();
   }, []);
 
-  const handleScrape = async () => {
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+    // Optional: Add toast notification here
+  };
+
+  const handleScrapeRequest = () => {
     const validUrls = urlInputs.map(u => u.trim()).filter(u => u.length > 0);
     if (validUrls.length === 0) return;
 
+    // Check for duplicates locally first
+    const duplicates: { url: string, id: string, displayId: string }[] = [];
+    validUrls.forEach(url => {
+      // Normalize URL for comparison (remove trailing slash, lowercase)
+      const normUrl = url.toLowerCase().replace(/\/$/, "");
+      const found = listings.find(l => l.url.toLowerCase().replace(/\/$/, "") === normUrl);
+      if (found) {
+        duplicates.push({ url, id: found.id, displayId: found.displayId });
+      }
+    });
+
+    if (duplicates.length > 0) {
+      setDuplicateWarnings(duplicates);
+      setPendingScrapeUrls(validUrls);
+      setShowDuplicateConfirm(true);
+    } else {
+      executeScrape(validUrls);
+    }
+  };
+
+  const executeScrape = async (urlsToScrape: string[]) => {
     setStatus(AppStatus.LOADING);
     setError(null);
     setProcessedCount(0);
     setFieldErrors({});
     setWaitingMessage('正在進行批次抓取與解析...');
+    setShowDuplicateConfirm(false);
 
     let statusUnsubscribe: (() => void) | null = null;
 
@@ -58,7 +90,7 @@ const App: React.FC = () => {
       const apiScrapeBatch = httpsCallable(functions, 'apiScrapeBatch');
 
       // 開始呼叫 API（不等待完成）
-      const resultPromise = apiScrapeBatch({ urls: validUrls });
+      const resultPromise = apiScrapeBatch({ urls: urlsToScrape });
 
       // 監聽 batch_status 集合的最新文件
       const batchStatusQuery = query(
@@ -93,7 +125,7 @@ const App: React.FC = () => {
       // 處理每個 URL 的結果
       details.forEach((item: any) => {
         if (item.success) {
-          successfulUrls.push(item.url);
+          successfulUrls.push(item.url.toLowerCase().replace(/\/$/, ""));
         } else {
           // 找回原始 index
           const originalIndex = urlInputs.findIndex(u => u.trim() === item.url);
@@ -103,22 +135,22 @@ const App: React.FC = () => {
         }
       });
 
-      setProcessedCount(validUrls.length);
+      setProcessedCount(urlsToScrape.length);
       setFieldErrors(newFieldErrors);
 
-      const hasErrors = Object.keys(newFieldErrors).length > 0;
+      // Robust clearing logic: Keep only URLs that were NOT successful
+      const remainingUrls = urlInputs.filter(u => {
+        const norm = u.trim().toLowerCase().replace(/\/$/, "");
+        return norm !== "" && !successfulUrls.includes(norm);
+      });
 
-      if (!hasErrors) {
-        // 全部成功
+      if (remainingUrls.length === 0) {
+        // All done, clear everything
         setUrlInputs(['']);
         setStatus(AppStatus.SUCCESS);
-      } else if (successfulUrls.length > 0) {
-        // 部分成功：只保留失敗的 URL
-        const failedUrls = urlInputs.filter((u, i) => !successfulUrls.includes(u.trim()) && u.trim());
-        setUrlInputs(failedUrls.length > 0 ? failedUrls : ['']);
-        setStatus(AppStatus.ERROR);
       } else {
-        // 全部失敗
+        // Some failed, keep them
+        setUrlInputs(remainingUrls);
         setStatus(AppStatus.ERROR);
       }
 
@@ -133,10 +165,13 @@ const App: React.FC = () => {
     }
   };
 
+  const handleScrape = async () => {
+    // Deprecated, redirected to handleScrapeRequest
+    handleScrapeRequest();
+  };
+
   const handleDelete = async (id: string) => {
-    if (window.confirm("確定要刪除此房源嗎？")) {
-      await deleteDoc(doc(db, 'listings', id));
-    }
+    await deleteDoc(doc(db, 'listings', id));
   };
 
   const handleUpdate = async (id: string, data: Partial<PropertyListing>) => {
@@ -172,13 +207,9 @@ const App: React.FC = () => {
     }
 
     // Filters
-    if (l.tsmc_distance_miles && l.tsmc_distance_miles > filters.maxTsmcDist) return false;
-
-    // Check if distance is calculated before filtering. If null, we currently KEEP it (to avoid hiding pending/failed calcs).
-    // Or users might interpret filter as "Must be within X". If data is missing, we can't be sure.
-    // Let's decide to KEEP nulls for now unless user complains.
-
-    if (l.costco_distance_miles != null && l.costco_distance_miles > filters.maxCostcoDist) return false;
+    // Distance filters removed as per user request (Show ALL regardless of distance)
+    // if (l.tsmc_distance_miles && l.tsmc_distance_miles > filters.maxTsmcDist) return false;
+    // if (l.costco_distance_miles != null && l.costco_distance_miles > filters.maxCostcoDist) return false;
 
     if (filters.showPriceDropOnly && !l.price_drop) return false;
     if (filters.showGoodSchoolOnly && l.school_district !== '優秀學區') return false;
@@ -194,7 +225,7 @@ const App: React.FC = () => {
   return (
     <div className="min-h-screen bg-[#FDFDFD] pb-20 font-sans text-slate-900">
       {/* Search Header */}
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm">
+      <header className="bg-white border-b border-slate-200 sticky top-0 z-[100] shadow-sm">
         <div className="max-w-7xl mx-auto px-6 py-4">
           <div className="flex items-center justify-between mb-4">
             <h1 className="text-xl font-bold flex items-center gap-2">
@@ -322,6 +353,10 @@ const App: React.FC = () => {
                 idx !== i
               ).length > 0;
 
+              // Check existing listing duplicate
+              const normUrl = url.trim().toLowerCase().replace(/\/$/, "");
+              const existingListing = url.trim() ? listings.find(l => l.url.toLowerCase().replace(/\/$/, "") === normUrl) : null;
+
               return (
                 <div key={i}>
                   <div className="flex gap-2 items-center">
@@ -348,6 +383,17 @@ const App: React.FC = () => {
                   </div>
                   {isDuplicate && (
                     <p className="text-red-500 text-xs mt-1 ml-1">⚠️ 此網址已重複輸入</p>
+                  )}
+                  {existingListing && (
+                    <div className="flex items-center gap-2 mt-1 ml-1 text-xs bg-yellow-50 text-yellow-800 p-2 rounded border border-yellow-200">
+                      <span>⚠️ 此房源已存在 (ID: {existingListing.displayId})</span>
+                      <button
+                        onClick={() => copyToClipboard(existingListing.displayId)}
+                        className="px-2 py-0.5 bg-yellow-100 hover:bg-yellow-200 text-yellow-800 rounded border border-yellow-300 transition-colors"
+                      >
+                        複製編號
+                      </button>
+                    </div>
                   )}
                   {fieldErrors[i] && (
                     <p className="text-red-500 text-xs mt-1 ml-1">❌ {fieldErrors[i]}</p>
@@ -385,6 +431,41 @@ const App: React.FC = () => {
           )}
         </div>
       </main>
+
+      {/* Duplicate Confirmation Modal */}
+      {showDuplicateConfirm && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[110]" onClick={() => setShowDuplicateConfirm(false)}>
+          <div className="bg-white p-6 rounded-xl shadow-2xl max-w-md w-full mx-4 relative" onClick={e => e.stopPropagation()}>
+            <h3 className="text-lg font-bold text-slate-900 mb-2">⚠️ 發現重複房源</h3>
+            <p className="text-sm text-slate-600 mb-4">
+              您輸入的網址中有 <span className="font-bold text-indigo-600">{duplicateWarnings.length}</span> 筆已經存在於資料庫中。
+              <br /><br />
+              若選擇繼續，系統將只更新該房源的 <span className="font-bold">價格</span> 與 <span className="font-bold">上市狀態</span>，其他資料將維持不變。
+            </p>
+            <div className="bg-slate-50 p-3 rounded border border-slate-100 mb-4 max-h-32 overflow-y-auto">
+              {duplicateWarnings.map((d, i) => (
+                <div key={i} className="text-xs text-slate-500 mb-1 last:mb-0 break-all">
+                  • {d.url} (ID: {d.displayId})
+                </div>
+              ))}
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => executeScrape(pendingScrapeUrls)}
+                className="flex-1 py-2.5 bg-indigo-600 text-white rounded-lg font-bold hover:bg-indigo-700"
+              >
+                確定更新
+              </button>
+              <button
+                onClick={() => setShowDuplicateConfirm(false)}
+                className="flex-1 py-2.5 bg-slate-200 text-slate-700 rounded-lg font-bold hover:bg-slate-300"
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
