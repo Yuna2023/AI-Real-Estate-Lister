@@ -1,48 +1,36 @@
 
 import React, { useState, useEffect } from 'react';
 import { PropertyListing, AppStatus } from './types';
-import { scrapeProperty } from './services/apiService';
 import PropertyCard from './components/PropertyCard';
-import { collection, onSnapshot, query, orderBy, doc, deleteDoc, updateDoc } from 'firebase/firestore';
-import { db } from './services/firebase';
+import { collection, onSnapshot, query, orderBy, deleteDoc, doc, updateDoc } from 'firebase/firestore';
+import { httpsCallable } from 'firebase/functions';
+import { db, functions } from './services/firebase';
+
 
 const App: React.FC = () => {
-  // 1. 預設只顯示一個 input 欄位
   const [urlInputs, setUrlInputs] = useState<string[]>(['']);
   const [listings, setListings] = useState<PropertyListing[]>([]);
   const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
   const [error, setError] = useState<string | null>(null);
   const [processedCount, setProcessedCount] = useState(0);
   const [fieldErrors, setFieldErrors] = useState<Record<number, string>>({});
+  const [waitingMessage, setWaitingMessage] = useState<string>('');
 
-  // 6. 預覽房源資料
-  const previewListing: PropertyListing = {
-    id: 'preview-id',
-    displayId: 'REF-SAMPLE',
-    createdAt: '2024-05-20',
-    url: '#',
-    daysOnMarket: '15',
-    yearBuilt: '2022',
-    price: '$850,000',
-    beds: '3',
-    baths: '2',
-    sqft: '1,800',
-    sqftLot: '4,500',
-    address: '範例展示：台北市信義區忠孝東路',
-    armls: '88866622',
-    description: '此為預覽卡片，展示系統抓取後的呈現樣式。包含多圖藝廊、完整房源參數與自動產生的編號日期。',
-    images: [
-      'https://images.unsplash.com/photo-1512917774080-9991f1c4c750?auto=format&fit=crop&q=80&w=800',
-      'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&q=80&w=800',
-      'https://images.unsplash.com/photo-1600607687940-4e524cb35a3a?auto=format&fit=crop&q=80&w=800'
-    ],
-    region: 'Phoenix',
-    priceStatus: '降價中',
-    listingStatus: '上市中',
-    lastUpdated: Date.now()
-  };
+  // Search Filters State
+  const [filters, setFilters] = useState({
+    keyword: '',
+    maxTsmcDist: 30, // Default max range
+    maxCostcoDist: 15,
+    showPriceDropOnly: false,
+    showGoodSchoolOnly: false,
+    showNoRoadFrontage: false, // true means ONLY show no road frontage (road_frontage === false)
+    showSouthFacing: false,
+    listingStatus: 'all', // all, pre_listed, listed, sold
+    listingType: 'all'    // all, for_sale, for_rent
+  });
 
   useEffect(() => {
+    // 監聽並取得所有房源，在前端進行篩選 (適用於內部管理系統規模)
     const q = query(collection(db, 'listings'), orderBy('lastUpdated', 'desc'));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const data = snapshot.docs.map(doc => ({
@@ -62,50 +50,96 @@ const App: React.FC = () => {
     setError(null);
     setProcessedCount(0);
     setFieldErrors({});
+    setWaitingMessage('正在進行批次抓取與解析...');
+
+    let statusUnsubscribe: (() => void) | null = null;
 
     try {
-      const total = validUrls.length;
-      let completed = 0;
+      const apiScrapeBatch = httpsCallable(functions, 'apiScrapeBatch');
 
-      await Promise.all(
-        urlInputs.map(async (url, index) => {
-          if (!url.trim()) return;
-          try {
-            await scrapeProperty(url);
-          } catch (err: any) {
-            setFieldErrors(prev => ({ ...prev, [index]: err.message || "抓取失敗" }));
-          } finally {
-            completed++;
-            setProcessedCount(completed);
-          }
-        })
+      // 開始呼叫 API（不等待完成）
+      const resultPromise = apiScrapeBatch({ urls: validUrls });
+
+      // 監聽 batch_status 集合的最新文件
+      const batchStatusQuery = query(
+        collection(db, 'batch_status'),
+        orderBy('startedAt', 'desc')
       );
 
-      // 如果有任何欄位失敗，不自動清空欄位，讓使用者可以看到錯誤
-      const hasErrors = Object.keys(fieldErrors).length > 0;
+      statusUnsubscribe = onSnapshot(batchStatusQuery, (snapshot) => {
+        if (snapshot.docs.length > 0) {
+          const latestBatch = snapshot.docs[0].data();
+          // 更新等待訊息為當前狀態
+          if (latestBatch.currentStatus) {
+            setWaitingMessage(latestBatch.currentStatus);
+          }
+          // 更新進度計數
+          if (latestBatch.completed !== undefined) {
+            setProcessedCount(latestBatch.completed);
+          }
+        }
+      });
+
+      // 等待 API 完成
+      const result: any = await resultPromise;
+      const { details } = result.data;
+
+      // 停止監聽
+      if (statusUnsubscribe) statusUnsubscribe();
+
+      const newFieldErrors: Record<number, string> = {};
+      const successfulUrls: string[] = [];
+
+      // 處理每個 URL 的結果
+      details.forEach((item: any) => {
+        if (item.success) {
+          successfulUrls.push(item.url);
+        } else {
+          // 找回原始 index
+          const originalIndex = urlInputs.findIndex(u => u.trim() === item.url);
+          if (originalIndex !== -1) {
+            newFieldErrors[originalIndex] = item.error || "抓取失敗";
+          }
+        }
+      });
+
+      setProcessedCount(validUrls.length);
+      setFieldErrors(newFieldErrors);
+
+      const hasErrors = Object.keys(newFieldErrors).length > 0;
+
       if (!hasErrors) {
+        // 全部成功
         setUrlInputs(['']);
         setStatus(AppStatus.SUCCESS);
+      } else if (successfulUrls.length > 0) {
+        // 部分成功：只保留失敗的 URL
+        const failedUrls = urlInputs.filter((u, i) => !successfulUrls.includes(u.trim()) && u.trim());
+        setUrlInputs(failedUrls.length > 0 ? failedUrls : ['']);
+        setStatus(AppStatus.ERROR);
       } else {
+        // 全部失敗
         setStatus(AppStatus.ERROR);
       }
 
       setTimeout(() => setStatus(AppStatus.IDLE), 3000);
+
     } catch (err: any) {
-      setError(err.message || "處理過程中發生錯誤");
+      if (statusUnsubscribe) statusUnsubscribe();
+      setError(err.message || "批次處理發生錯誤");
       setStatus(AppStatus.ERROR);
+    } finally {
+      setWaitingMessage('');
     }
   };
 
   const handleDelete = async (id: string) => {
-    if (id === 'preview-id') return; // 不允許刪除預覽
     if (window.confirm("確定要刪除此房源嗎？")) {
       await deleteDoc(doc(db, 'listings', id));
     }
   };
 
   const handleUpdate = async (id: string, data: Partial<PropertyListing>) => {
-    if (id === 'preview-id') return;
     await updateDoc(doc(db, 'listings', id), {
       ...data,
       lastUpdated: Date.now()
@@ -113,11 +147,8 @@ const App: React.FC = () => {
   };
 
   const addInputField = () => setUrlInputs([...urlInputs, '']);
-
-  // 5. 移除 input 欄位邏輯
   const removeInputField = (index: number) => {
     if (urlInputs.length <= 1) {
-      // 永遠保持最少一個輸入欄位
       setUrlInputs(['']);
       return;
     }
@@ -126,116 +157,220 @@ const App: React.FC = () => {
     setUrlInputs(next);
   };
 
+  // Filtering Logic
+  const filteredListings = listings.filter(l => {
+    // Keyword Search
+    if (filters.keyword) {
+      const k = filters.keyword.toLowerCase();
+      const content = [
+        l.address,
+        l.region,
+        l.displayId,
+        ...(l.tags || [])
+      ].join(' ').toLowerCase();
+      if (!content.includes(k)) return false;
+    }
+
+    // Filters
+    if (l.tsmc_distance_miles && l.tsmc_distance_miles > filters.maxTsmcDist) return false;
+
+    // Check if distance is calculated before filtering. If null, we currently KEEP it (to avoid hiding pending/failed calcs).
+    // Or users might interpret filter as "Must be within X". If data is missing, we can't be sure.
+    // Let's decide to KEEP nulls for now unless user complains.
+
+    if (l.costco_distance_miles != null && l.costco_distance_miles > filters.maxCostcoDist) return false;
+
+    if (filters.showPriceDropOnly && !l.price_drop) return false;
+    if (filters.showGoodSchoolOnly && l.school_district !== '優秀學區') return false;
+    if (filters.showNoRoadFrontage && l.road_frontage === true) return false; // road_frontage=true means Issue
+    if (filters.showSouthFacing && l.orientation !== true) return false;
+
+    if (filters.listingStatus !== 'all' && l.listing_status !== filters.listingStatus) return false;
+    if (filters.listingType !== 'all' && l.listing_type !== filters.listingType) return false;
+
+    return true;
+  });
+
   return (
-    <div className="min-h-screen bg-[#FDFDFD] pb-20">
-      <header className="px-8 h-16 flex items-center justify-between border-b border-slate-100 bg-white sticky top-0 z-20">
-        <h1 className="text-lg font-bold text-slate-900 tracking-tight flex items-center gap-2">
-          <span className="w-7 h-7 bg-indigo-600 rounded-md flex items-center justify-center text-white text-[10px] font-black">AI</span>
-          房源中台管理系統
-        </h1>
-        <div className="flex items-center gap-4">
-          <span className="text-xs font-semibold text-slate-400 bg-slate-50 px-3 py-1 rounded-full border border-slate-100">
-            {listings.length} 個房源
-          </span>
+    <div className="min-h-screen bg-[#FDFDFD] pb-20 font-sans text-slate-900">
+      {/* Search Header */}
+      <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm">
+        <div className="max-w-7xl mx-auto px-6 py-4">
+          <div className="flex items-center justify-between mb-4">
+            <h1 className="text-xl font-bold flex items-center gap-2">
+              <span className="bg-indigo-600 text-white px-2 py-1 rounded text-sm font-black">AZ</span>
+              房源中台系統
+            </h1>
+            <div className="text-sm text-slate-500">
+              顯示 {filteredListings.length} / {listings.length} 筆
+            </div>
+          </div>
+
+          {/* Search Controls */}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 p-4 bg-slate-50 rounded-xl border border-slate-100">
+            {/* 1. Keyword */}
+            <div className="col-span-1 md:col-span-4">
+              <input
+                type="text"
+                placeholder="🔍 搜尋關鍵字 (地區、標籤、ID...)"
+                className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                value={filters.keyword}
+                onChange={e => setFilters(p => ({ ...p, keyword: e.target.value }))}
+              />
+            </div>
+
+            {/* 2. Sliders */}
+            <div className="space-y-3">
+              <label className="text-xs font-bold text-slate-500 block flex justify-between">
+                TSMC 距離 (英里) <span className="text-indigo-600">{filters.maxTsmcDist} mi</span>
+              </label>
+              <input
+                type="range" min="0" max="50" step="1"
+                className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                value={filters.maxTsmcDist}
+                onChange={e => setFilters(p => ({ ...p, maxTsmcDist: parseInt(e.target.value) }))}
+              />
+            </div>
+            <div className="space-y-3">
+              <label className="text-xs font-bold text-slate-500 block flex justify-between">
+                Costco 距離 (英里) <span className="text-indigo-600">{filters.maxCostcoDist} mi</span>
+              </label>
+              <input
+                type="range" min="0" max="30" step="1"
+                className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                value={filters.maxCostcoDist}
+                onChange={e => setFilters(p => ({ ...p, maxCostcoDist: parseInt(e.target.value) }))}
+              />
+            </div>
+
+            {/* 3. Checkboxes */}
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <label className="flex items-center gap-2 cursor-pointer select-none">
+                <input type="checkbox" className="accent-indigo-600" checked={filters.showPriceDropOnly} onChange={e => setFilters(p => ({ ...p, showPriceDropOnly: e.target.checked }))} />
+                📉 降價
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer select-none">
+                <input type="checkbox" className="accent-indigo-600" checked={filters.showGoodSchoolOnly} onChange={e => setFilters(p => ({ ...p, showGoodSchoolOnly: e.target.checked }))} />
+                🎓 優秀學區
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer select-none">
+                <input type="checkbox" className="accent-indigo-600" checked={filters.showNoRoadFrontage} onChange={e => setFilters(p => ({ ...p, showNoRoadFrontage: e.target.checked }))} />
+                🛣️ 無路衝
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer select-none">
+                <input type="checkbox" className="accent-indigo-600" checked={filters.showSouthFacing} onChange={e => setFilters(p => ({ ...p, showSouthFacing: e.target.checked }))} />
+                🧭 坐北朝南
+              </label>
+            </div>
+
+            {/* 4. Dropdowns + Clear */}
+            <div className="flex gap-2">
+              <select
+                className="flex-1 px-2 py-1 text-xs border border-slate-300 rounded bg-white"
+                value={filters.listingStatus}
+                onChange={e => setFilters(p => ({ ...p, listingStatus: e.target.value }))}
+              >
+                <option value="all">所有狀態</option>
+                <option value="pre_listed">搶先看 (Pre)</option>
+                <option value="listed">已上市 (Active)</option>
+                <option value="sold">已售出 (Sold)</option>
+              </select>
+              <button
+                onClick={() => setFilters({
+                  keyword: '',
+                  maxTsmcDist: 30,
+                  maxCostcoDist: 15,
+                  showPriceDropOnly: false,
+                  showGoodSchoolOnly: false,
+                  showNoRoadFrontage: false,
+                  showSouthFacing: false,
+                  listingStatus: 'all',
+                  listingType: 'all'
+                })}
+                className="px-3 py-1 bg-slate-200 text-slate-600 text-xs rounded hover:bg-slate-300 transition-colors"
+              >
+                清除
+              </button>
+            </div>
+          </div>
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-6 pt-12">
-        <section className="bg-white p-10 rounded-2xl border border-slate-100 mb-12 max-w-3xl mx-auto">
-          <div className="flex justify-between items-center mb-8">
-            <div>
-              <h2 className="text-xl font-bold text-slate-900 mb-1">導入房源網址</h2>
-              <p className="text-sm text-slate-400">貼上網址，系統將透過 Firecrawl 自動完成資訊分析</p>
-            </div>
-            {/* 2. 新增欄位按鈕：白底藍紫色外框 */}
-            {/* 2. 新增欄位按鈕：達到 4 筆時變灰 */}
+      <main className="max-w-7xl mx-auto px-6 py-8">
+
+        {/* Scrape Input Section (Collapsible or Standard) */}
+        <section className="bg-white p-6 rounded-2xl border border-slate-100 mb-8 shadow-sm">
+          <div className="flex justify-between items-center mb-4">
+            <h2 className="font-bold text-slate-800">＋ 新增房源</h2>
             <button
               onClick={addInputField}
               disabled={urlInputs.length >= 4}
-              className={`px-4 py-2 border rounded-lg text-sm font-bold transition-colors ${urlInputs.length >= 4
-                  ? 'border-slate-200 text-slate-300 bg-slate-50 cursor-not-allowed'
-                  : 'border-indigo-600 text-indigo-600 bg-white hover:bg-indigo-50'
+              className={`text-sm font-bold px-3 py-1.5 rounded-lg border transition-colors ${urlInputs.length >= 4
+                ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
+                : 'bg-white text-indigo-600 border-indigo-500 hover:bg-indigo-50'
                 }`}
             >
-              {urlInputs.length >= 4 ? '已達上限' : '+ 新增欄位'}
+              + 增加網址
             </button>
           </div>
-
-          <div className="space-y-4">
+          <div className="space-y-3">
             {urlInputs.map((url, i) => {
-              // 正規化比較網址 (去斜槓 + 小寫)
-              const normalizedUrl = url.trim().replace(/\/$/, "").toLowerCase();
-              const isDuplicate = url.trim() !== '' &&
-                status !== AppStatus.LOADING && // 正在抓取時不顯示警示，避免新存入的資料誤報
-                listings.some(l => l.url === normalizedUrl);
+              // Check for duplicate URLs
+              const isDuplicate = urlInputs.filter((u, idx) =>
+                u.trim().toLowerCase() === url.trim().toLowerCase() &&
+                u.trim() !== '' &&
+                idx !== i
+              ).length > 0;
+
               return (
-                <div key={i} className="space-y-1">
-                  <div className="flex items-center gap-3">
+                <div key={i}>
+                  <div className="flex gap-2 items-center">
                     <input
                       value={url}
-                      onChange={(e) => {
+                      onChange={e => {
                         const next = [...urlInputs];
                         next[i] = e.target.value;
                         setUrlInputs(next);
                       }}
-                      placeholder="請貼上房源網址 (例如 Zillow, Redfin...)"
-                      className={`flex-1 px-4 py-3 bg-[#FCFCFC] border ${isDuplicate ? 'border-red-200 focus:border-red-400' : 'border-slate-100 focus:border-indigo-500'} rounded-lg text-sm focus:bg-white transition-all outline-none`}
+                      placeholder="輸入 Zillow/Redfin 網址..."
+                      className={`flex-1 px-4 py-2 bg-slate-50 border rounded focus:border-indigo-500 outline-none text-sm ${isDuplicate ? 'border-red-400 bg-red-50' : 'border-slate-200'
+                        }`}
                     />
-                    {/* 4. 垃圾桶 icon */}
                     <button
                       onClick={() => removeInputField(i)}
-                      className="p-3 text-slate-400 hover:text-red-500 transition-colors"
-                      title="移除欄位"
+                      className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
+                      title={urlInputs.length === 1 ? '清空內容' : '刪除欄位'}
                     >
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
                       </svg>
                     </button>
                   </div>
-                  {fieldErrors[i] ? (
-                    <p className="text-[11px] text-red-500 font-medium ml-1">
-                      ❌ {fieldErrors[i]}
-                    </p>
-                  ) : isDuplicate && (
-                    <p className="text-[11px] text-amber-600 font-bold ml-1 animate-pulse">
-                      ⚠️ 這筆房源網址已經存在，是否確定要抓取資料？
-                    </p>
+                  {isDuplicate && (
+                    <p className="text-red-500 text-xs mt-1 ml-1">⚠️ 此網址已重複輸入</p>
+                  )}
+                  {fieldErrors[i] && (
+                    <p className="text-red-500 text-xs mt-1 ml-1">❌ {fieldErrors[i]}</p>
                   )}
                 </div>
               );
             })}
-
-            {/* 3. 取得房源資料按鈕：藍紫色底無外框 */}
+            {status === AppStatus.ERROR && error && <div className="text-red-500 text-sm">{error}</div>}
             <button
               onClick={handleScrape}
-              disabled={status === AppStatus.LOADING || urlInputs.every(u => !u.trim())}
-              className="w-full mt-6 py-4 bg-indigo-600 text-white rounded-lg text-sm font-bold disabled:bg-slate-300 transition-all flex items-center justify-center gap-2 border-none"
+              disabled={status === AppStatus.LOADING}
+              className="w-full py-3 bg-indigo-600 text-white rounded-lg font-bold hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {status === AppStatus.LOADING
-                ? `正在抓取第 ${processedCount + 1} 筆房源資料...`
-                : '取得房源資料'}
+                ? waitingMessage || `正在抓取第 ${processedCount + 1} 筆 / 共 ${urlInputs.filter(u => u.trim()).length} 筆房源...`
+                : '開始分析'}
             </button>
           </div>
-
-          {error && (
-            <div className="mt-4 p-3 bg-red-50 border border-red-100 rounded text-red-600 text-xs font-medium">
-              ⚠️ {error}
-            </div>
-          )}
         </section>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-10">
-          {/* 6. 房源卡片預覽區 */}
-          <div className="relative">
-            <div className="absolute -top-3 left-4 z-10 bg-indigo-600 text-white text-[10px] font-bold px-2 py-1 rounded">PREVIEW 預覽</div>
-            <PropertyCard
-              listing={previewListing}
-              onDelete={() => { }}
-              onUpdate={() => { }}
-            />
-          </div>
-
-          {listings.map(listing => (
+        {/* Listings Grid */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-3 gap-6">
+          {filteredListings.map(listing => (
             <PropertyCard
               key={listing.id}
               listing={listing}
@@ -243,11 +378,9 @@ const App: React.FC = () => {
               onUpdate={handleUpdate}
             />
           ))}
-
-          {listings.length === 0 && status !== AppStatus.LOADING && (
-            <div className="hidden md:flex flex-col items-center justify-center py-24 text-center border border-dashed border-slate-200 rounded-2xl bg-slate-50/50">
-              <div className="text-3xl mb-4 grayscale opacity-30">🏠</div>
-              <h3 className="text-sm font-bold text-slate-400">等待導入房源</h3>
+          {filteredListings.length === 0 && (
+            <div className="col-span-full py-20 text-center text-slate-400">
+              沒有符合搜尋條件的房源
             </div>
           )}
         </div>

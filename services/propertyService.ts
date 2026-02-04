@@ -52,14 +52,42 @@ export const extractPropertyData = async (url: string): Promise<PropertyListing>
       daysOnMarket: data.daysOnMarket || "1",
       yearBuilt: data.yearBuilt || "未知",
       price: data.price || "未提供",
+      price_usd: null,
       beds: "0",
       baths: "0",
       sqft: "0",
       sqftLot: "0",
+      sqftPing: null,
+      sqftLotPing: null,
       address: data.address || "未提供地址",
+      region: null,
       armls: "N/A",
       description: "尚無描述",
+      descriptionZh: null,
       images: data.images?.length > 0 ? data.images : ["https://images.unsplash.com/photo-1564013799919-ab600027ffc6?auto=format&fit=crop&q=80&w=800"],
+
+      // Status & Workflow
+      edit_status: "draft",
+      listing_status: "pre_listed",
+      listing_type: "for_sale",
+      price_drop: false,
+
+      // Tags & Distances
+      tags: [],
+      tsmc_distance_miles: null,
+      intel_distance_miles: null,
+      airport_distance_miles: null,
+      costco_distance_miles: null,
+      tsmc_duration_minutes: null,
+      intel_duration_minutes: null,
+      airport_duration_minutes: null,
+      costco_duration_minutes: null,
+
+      // Features
+      school_district: "一般",
+      road_frontage: false,
+      orientation: false,
+
       lastUpdated: Date.now()
     };
   } catch (error) {
