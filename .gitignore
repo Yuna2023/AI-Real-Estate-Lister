@@ -15,3 +15,13 @@ build/
 # 系統檔案
 .DS_Store
 Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Local Scripts (Not for repo)
+scripts/debug_ghost_data.py
+scripts/manual_cleanup.py
+scripts/verify_extraction.py
+functions/index.js_TEMP
