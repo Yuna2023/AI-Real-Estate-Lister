@@ -23,6 +23,7 @@ const processImages = (images) => {
 };
 
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
+const { logger } = require("firebase-functions");
 
 // ========================================
 // Markdown 預處理 (含 cchanghomes.com 專屬規則)
@@ -488,6 +489,7 @@ exports.apiScrapeBatch = onCall({
 
   await statusRef.set({
     startedAt: admin.firestore.FieldValue.serverTimestamp(),
+    expireAt: admin.firestore.Timestamp.fromDate(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)), // 7 Days TTL
     total: totalCount,
     completed: 0,
     failed: 0,
@@ -614,6 +616,7 @@ exports.apiScrapeBatch = onCall({
       return { url, success: true, id: docRef.id };
 
     } catch (err) {
+      logger.error(`Batch item failed: ${url}`, { error: err.message, batchId });
       await updateItemStatus(index, 'error', `✗ ${err.message}`);
       return { url, success: false, error: err.message };
     }
